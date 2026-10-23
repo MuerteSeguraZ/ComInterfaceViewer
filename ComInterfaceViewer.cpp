@@ -28,15 +28,27 @@
 #define IDM_VIEW_COLLAPSE 1102
 #define IDM_VIEW_REGDETAILS  1103
 #define IDM_HELP_ABOUT 1201
+#define IDM_EDIT_FIND 1301
 #define IDC_TREEVIEW 2001
+#define IDC_FIND_TEXT 3001
+#define IDC_FIND_TYPE 3002
+#define IDC_FIND_NEXT 3003
+#define IDC_FIND_CANCEL 3004
 
 // Globals
 BOOL g_bShowRegDetails = FALSE;
 HINSTANCE g_hInst = NULL;
 HWND g_hMain = NULL;
 HWND g_hTree = NULL;
+HTREEITEM g_hLastFound = NULL;
 TCHAR g_szFile[MAX_PATH] = {0};
 TCHAR g_szLastRegFile[MAX_PATH] = {0};
+TCHAR g_szLastSearch[256] = {0};
+int g_nLastFilter = 0;
+
+static HWND g_hFindDlg = NULL;
+static HWND g_hFindEdit = NULL;
+static HWND g_hFindCombo = NULL;
 
 // Helpers
 void SetStatusText(HWND hWnd, LPCWSTR text)
@@ -75,7 +87,6 @@ void ExpandAll(HWND hTree, HTREEITEM hItem, BOOL expand)
     }
 }
 
-// We're not gonna overcomplicate ourselves, let's just list interfaces + methods + GUIDs
 void PopulateFromTypeLib(ITypeLib* pTypeLib, LPCWSTR fileName)
 {
     TreeView_DeleteAllItems(g_hTree);
@@ -189,6 +200,7 @@ BOOL LoadAndShow(LPCWSTR path)
     pTypeLib->Release();
 
     StringCchCopy(g_szFile, MAX_PATH, path);
+    g_szLastRegFile[0] = 0;
     SetStatusText(g_hMain, fileName);
     return TRUE;
 }
@@ -198,6 +210,7 @@ HMENU CreateMainMenu()
 {
     HMENU hMenu = CreateMenu();
     HMENU hFile = CreatePopupMenu();
+    HMENU hEdit = CreatePopupMenu();
     HMENU hView = CreatePopupMenu();
     HMENU hHelp = CreatePopupMenu();
 
@@ -206,6 +219,8 @@ HMENU CreateMainMenu()
     AppendMenu(hFile, MF_SEPARATOR, 0, NULL);
     AppendMenu(hFile, MF_STRING, IDM_FILE_EXIT, L"E&xit\tAlt+F4");
 
+    AppendMenu(hEdit, MF_STRING, IDM_EDIT_FIND, L"&Find...\tCtrl+F");
+
     AppendMenu(hView, MF_STRING, IDM_VIEW_EXPAND,   L"&Expand All");
     AppendMenu(hView, MF_STRING, IDM_VIEW_COLLAPSE, L"&Collapse All");
     AppendMenu(hView, MF_STRING | MF_UNCHECKED, IDM_VIEW_REGDETAILS, L"Show &Registry Details");
@@ -213,6 +228,7 @@ HMENU CreateMainMenu()
     AppendMenu(hHelp, MF_STRING, IDM_HELP_ABOUT, L"&About...");
 
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFile, L"&File");
+    AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hEdit, L"&Edit");
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hView, L"&View");
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hHelp, L"&Help");
 
@@ -227,7 +243,7 @@ void DoOpen()
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g_hMain;
     ofn.lpstrFilter = L"COM Libraries (*.dll;*.ocx;*.tlb)\0*.dll;*.ocx;*.tlb\0"
-                      L"All Files (*.*)\0*.*\0";
+                       L"All Files (*.*)\0*.*\0";
     ofn.lpstrFile = szFile;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
@@ -247,7 +263,7 @@ void DoOpenRegistry()
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g_hMain;
     ofn.lpstrFilter = L"COM Libraries (*.dll;*.ocx)\0*.dll;*.ocx\0"
-                      L"All Files (*.*)\0*.*\0";
+                       L"All Files (*.*)\0*.*\0";
     ofn.lpstrFile = szFile;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
@@ -282,6 +298,223 @@ void DoAbout()
                L"You like the GUI?",
                L"About",
                MB_OK | MB_ICONINFORMATION);
+}
+
+static BOOL MatchFilter(LPCWSTR text, int filter)
+{
+    if (!text || !*text) return FALSE;
+
+    switch (filter)
+    {
+    case 1: // Interface
+        return (wcschr(text, L'{') != NULL) ||
+               (wcsncmp(text, L"[", 1) != 0 &&
+                wcsncmp(text, L"ThreadingModel:", 15) != 0 &&
+                wcsncmp(text, L"ProgID:", 7) != 0 &&
+                wcsncmp(text, L"VersionIndependentProgID:", 25) != 0 &&
+                wcsncmp(text, L"TypeLib:", 8) != 0);
+    case 2: // GUID
+        return wcschr(text, L'{') != NULL;
+    case 3: // Method
+        return wcsncmp(text, L"[", 1) == 0;
+    default:
+        return TRUE;
+    }
+}
+
+static HTREEITEM FindInTreeRecursive(HWND hTree, HTREEITEM hItem, LPCWSTR search, int filter,
+                                     HTREEITEM hAfter, BOOL* pPassed)
+{
+    while (hItem)
+    {
+        if (hAfter && hItem == hAfter)
+            *pPassed = TRUE;
+
+        WCHAR text[512] = {0};
+        TVITEM tvi = {0};
+        tvi.mask       = TVIF_TEXT;
+        tvi.hItem      = hItem;
+        tvi.pszText    = text;
+        tvi.cchTextMax = 512;
+        TreeView_GetItem(hTree, &tvi);
+
+        BOOL isMatch = MatchFilter(text, filter);
+        if (isMatch)
+        {
+            WCHAR h[512], n[256];
+            StringCchCopyW(h, 512, text);
+            StringCchCopyW(n, 256, search);
+            CharLowerW(h);
+            CharLowerW(n);
+            isMatch = (wcsstr(h, n) != NULL);
+        }
+
+        if (isMatch && (!hAfter || *pPassed) && hItem != hAfter)
+            return hItem;
+
+        HTREEITEM hChild = TreeView_GetChild(hTree, hItem);
+        if (hChild)
+        {
+            HTREEITEM found = FindInTreeRecursive(hTree, hChild, search, filter, hAfter, pPassed);
+            if (found)
+                return found;
+        }
+
+        hItem = TreeView_GetNextSibling(hTree, hItem);
+    }
+    return NULL;
+}
+
+static BOOL SearchTree(HWND hTree, LPCWSTR search, int filter, BOOL fromNext)
+{
+    if (!search || !*search)
+        return FALSE;
+
+    BOOL passed = !fromNext;
+    HTREEITEM hAfter = fromNext ? g_hLastFound : NULL;
+
+    HTREEITEM hFound = FindInTreeRecursive(hTree, TreeView_GetRoot(hTree),
+                                           search, filter, hAfter, &passed);
+
+    if (hFound)
+    {
+        HTREEITEM h = hFound;
+        while (h)
+        {
+            TreeView_Expand(hTree, h, TVE_EXPAND);
+            h = TreeView_GetParent(hTree, h);
+        }
+        TreeView_SelectItem(hTree, hFound);
+        TreeView_EnsureVisible(hTree, hFound);
+        g_hLastFound = hFound;
+        return TRUE;
+    }
+
+    g_hLastFound = NULL;
+    return FALSE;
+}
+
+static LRESULT CALLBACK FindDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg)
+    {
+    case WM_COMMAND:
+    {
+        int id   = LOWORD(wParam);
+        int code = HIWORD(wParam);
+
+        if (id == IDC_FIND_CANCEL || id == IDCANCEL)
+        {
+            DestroyWindow(hDlg);
+            return 0;
+        }
+
+        if (id == IDC_FIND_NEXT && (code == BN_CLICKED || code == 0))
+        {
+            WCHAR search[256] = {0};
+            GetWindowText(g_hFindEdit, search, 256);
+
+            int filter = (int)SendMessage(g_hFindCombo, CB_GETCURSEL, 0, 0);
+            if (filter < 0) filter = 0;
+
+            StringCchCopy(g_szLastSearch, 256, search);
+            g_nLastFilter = filter;
+
+            if (!SearchTree(g_hTree, search, filter, TRUE))
+            {
+                MessageBox(hDlg, L"No more matches.", L"Find", MB_OK | MB_ICONINFORMATION);
+                g_hLastFound = NULL;
+            }
+            return 0;
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+        DestroyWindow(hDlg);
+        return 0;
+
+    case WM_DESTROY:
+        EnableWindow(g_hMain, TRUE);
+        g_hFindDlg = NULL;
+        SetFocus(g_hMain);
+        return 0;
+    }
+    return DefWindowProc(hDlg, msg, wParam, lParam);
+}
+
+void DoFind()
+{
+    if (g_hFindDlg)
+    {
+        SetForegroundWindow(g_hFindDlg);
+        return;
+    }
+
+    static BOOL registered = FALSE;
+    if (!registered)
+    {
+        WNDCLASSEX wc = {0};
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = FindDlgProc;
+        wc.hInstance     = g_hInst;
+        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_3DFACE + 1);
+        wc.lpszClassName = L"ComInterfaceViewerFindDlg";
+        RegisterClassEx(&wc);
+        registered = TRUE;
+    }
+
+    g_hFindDlg = CreateWindowEx(
+        WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
+        L"ComInterfaceViewerFindDlg",
+        L"Find",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        0, 0, 380, 150,
+        g_hMain, NULL, g_hInst, NULL);
+
+    if (!g_hFindDlg) return;
+
+    // center on main window
+    RECT rcMain, rcDlg;
+    GetWindowRect(g_hMain, &rcMain);
+    GetWindowRect(g_hFindDlg, &rcDlg);
+    int x = rcMain.left + ((rcMain.right - rcMain.left) - (rcDlg.right - rcDlg.left)) / 2;
+    int y = rcMain.top  + ((rcMain.bottom - rcMain.top) - (rcDlg.bottom - rcDlg.top)) / 2;
+    SetWindowPos(g_hFindDlg, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
+    // controls
+    g_hFindEdit = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", g_szLastSearch,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        12, 16, 230, 24, g_hFindDlg, (HMENU)IDC_FIND_TEXT, g_hInst, NULL);
+
+    g_hFindCombo = CreateWindow(L"COMBOBOX", NULL,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+        250, 16, 110, 200, g_hFindDlg, (HMENU)IDC_FIND_TYPE, g_hInst, NULL);
+
+    SendMessage(g_hFindCombo, CB_ADDSTRING, 0, (LPARAM)L"All");
+    SendMessage(g_hFindCombo, CB_ADDSTRING, 0, (LPARAM)L"Interface");
+    SendMessage(g_hFindCombo, CB_ADDSTRING, 0, (LPARAM)L"GUID");
+    SendMessage(g_hFindCombo, CB_ADDSTRING, 0, (LPARAM)L"Method");
+    SendMessage(g_hFindCombo, CB_SETCURSEL, g_nLastFilter, 0);
+
+    HWND hBtnNext = CreateWindow(L"BUTTON", L"Find Next",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        80, 60, 100, 28, g_hFindDlg, (HMENU)IDC_FIND_NEXT, g_hInst, NULL);
+
+    HWND hBtnCancel = CreateWindow(L"BUTTON", L"Cancel",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        200, 60, 100, 28, g_hFindDlg, (HMENU)IDC_FIND_CANCEL, g_hInst, NULL);
+
+    HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    SendMessage(g_hFindEdit,  WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessage(g_hFindCombo, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessage(hBtnNext,     WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessage(hBtnCancel,   WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    EnableWindow(g_hMain, FALSE);
+    ShowWindow(g_hFindDlg, SW_SHOW);
+    SetFocus(g_hFindEdit);
 }
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -320,6 +553,33 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
+    case WM_NOTIFY:
+    {
+        LPNMHDR pnmh = (LPNMHDR)lParam;
+        if (pnmh->hwndFrom == g_hTree && pnmh->code == NM_CUSTOMDRAW)
+        {
+            LPNMTVCUSTOMDRAW pcd = (LPNMTVCUSTOMDRAW)lParam;
+
+            switch (pcd->nmcd.dwDrawStage)
+            {
+            case CDDS_PREPAINT:
+                return CDRF_NOTIFYITEMDRAW;
+
+            case CDDS_ITEMPREPAINT:
+            {
+                // HACK HACK HACK!!! FORCE BLUE!!!!
+                if (pcd->nmcd.uItemState & CDIS_SELECTED)
+                {
+                    pcd->clrText   = RGB(255, 255, 255);   // white text
+                    pcd->clrTextBk = RGB(0, 0, 128);       // classic blue
+                }
+                return CDRF_NEWFONT;
+            }
+            }
+        }
+        break;
+}
+
     case WM_COMMAND:
     {
         switch (LOWORD(wParam))
@@ -332,6 +592,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             break;
         case IDM_FILE_EXIT:
             DestroyWindow(hWnd);
+            break;
+        case IDM_EDIT_FIND:
+            DoFind();
             break;
         case IDM_VIEW_EXPAND:
             ExpandAll(g_hTree, TreeView_GetRoot(g_hTree), TRUE);
@@ -369,6 +632,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (wParam == 'O' && (GetKeyState(VK_CONTROL) & 0x8000))
         {
             DoOpen();
+            return 0;
+        }
+        if (wParam == 'F' && (GetKeyState(VK_CONTROL) & 0x8000))
+        {
+            DoFind();
             return 0;
         }
         break;
@@ -445,6 +713,9 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0))
     {
+        if (g_hFindDlg && IsDialogMessage(g_hFindDlg, &msg))
+            continue;
+
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
