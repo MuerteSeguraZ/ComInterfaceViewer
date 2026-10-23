@@ -69,7 +69,7 @@ void ExpandAll(HWND hTree, HTREEITEM hItem, BOOL expand)
     }
 }
 
-// We're not gonna overcomplicate ourselves, let's just list interfaces and GUIDs
+// We're not gonna overcomplicate ourselves, let's just list interfaces + methods + GUIDs
 void PopulateFromTypeLib(ITypeLib* pTypeLib, LPCWSTR fileName)
 {
     TreeView_DeleteAllItems(g_hTree);
@@ -106,7 +106,45 @@ void PopulateFromTypeLib(ITypeLib* pTypeLib, LPCWSTR fileName)
             else
                 StringCchPrintf(szText, 512, L"(unnamed)  %s", szGuid);
 
-            AddTreeItem(g_hTree, hIfaces, szText);
+            // interface node (will hold the methods as children)
+            HTREEITEM hIface = AddTreeItem(g_hTree, hIfaces, szText);
+
+            // now dump the methods
+            for (UINT m = 0; m < pAttr->cFuncs; ++m)
+            {
+                FUNCDESC* pFuncDesc = NULL;
+                if (FAILED(pTypeInfo->GetFuncDesc(m, &pFuncDesc)) || !pFuncDesc)
+                    continue;
+
+                BSTR bstrFuncName = NULL;
+                pTypeInfo->GetDocumentation(pFuncDesc->memid, &bstrFuncName, NULL, NULL, NULL);
+
+                WCHAR szMethod[256];
+                if (bstrFuncName && *bstrFuncName)
+                {
+                    // little prefix so you can see what kind it is
+                    LPCWSTR kind = L"";
+                    switch (pFuncDesc->invkind)
+                    {
+                    case INVOKE_FUNC: kind = L"[method] "; break;
+                    case INVOKE_PROPERTYGET: kind = L"[get] ";    break;
+                    case INVOKE_PROPERTYPUT: kind = L"[put] ";    break;
+                    case INVOKE_PROPERTYPUTREF:kind = L"[putref] "; break;
+                    }
+                    StringCchPrintf(szMethod, 256, L"%s%s", kind, bstrFuncName);
+                }
+                else
+                {
+                    StringCchPrintf(szMethod, 256, L"(unnamed method)");
+                }
+
+                AddTreeItem(g_hTree, hIface, szMethod);
+
+                if (bstrFuncName)
+                    SysFreeString(bstrFuncName);
+
+                pTypeInfo->ReleaseFuncDesc(pFuncDesc);
+            }
 
             if (bstrName)
                 SysFreeString(bstrName);
