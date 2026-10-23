@@ -36,6 +36,7 @@ HINSTANCE g_hInst = NULL;
 HWND g_hMain = NULL;
 HWND g_hTree = NULL;
 TCHAR g_szFile[MAX_PATH] = {0};
+TCHAR g_szLastRegFile[MAX_PATH] = {0};
 
 // Helpers
 void SetStatusText(HWND hWnd, LPCWSTR text)
@@ -260,9 +261,15 @@ void DoOpenRegistry()
                 fileName = p + 1;
 
         if (PopulateFromRegistry(g_hTree, szFile, g_bShowRegDetails))
+        {
+            StringCchCopy(g_szLastRegFile, MAX_PATH, szFile);
             SetStatusText(g_hMain, fileName);
+        }
         else
+        {
+            g_szLastRegFile[0] = 0;
             SetStatusText(g_hMain, L"(no registered classes)");
+        }
     }
 }
 
@@ -338,6 +345,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             HMENU hMenu = GetMenu(hWnd);
             CheckMenuItem(hMenu, IDM_VIEW_REGDETAILS,
                           MF_BYCOMMAND | (g_bShowRegDetails ? MF_CHECKED : MF_UNCHECKED));
+
+            if (g_szLastRegFile[0])
+            {
+                LPCWSTR fileName = g_szLastRegFile;
+                for (LPCWSTR p = g_szLastRegFile; *p; ++p)
+                    if (*p == L'\\' || *p == L'/')
+                        fileName = p + 1;
+
+                PopulateFromRegistry(g_hTree, g_szLastRegFile, g_bShowRegDetails);
+                SetStatusText(g_hMain, fileName);
+            }
             break;
         }
         case IDM_HELP_ABOUT:
