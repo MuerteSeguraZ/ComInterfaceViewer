@@ -13,6 +13,8 @@
 #include <tchar.h>
 #include <strsafe.h>
 
+#include "RegistryMode.h"
+
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
@@ -21,6 +23,7 @@
 // IDs
 #define IDM_FILE_OPEN 1001
 #define IDM_FILE_EXIT 1002
+#define IDM_FILE_OPEN_REG 1003
 #define IDM_VIEW_EXPAND 1101
 #define IDM_VIEW_COLLAPSE 1102
 #define IDM_HELP_ABOUT 1201
@@ -196,6 +199,7 @@ HMENU CreateMainMenu()
     HMENU hHelp = CreatePopupMenu();
 
     AppendMenu(hFile, MF_STRING, IDM_FILE_OPEN, L"&Open...\tCtrl+O");
+    AppendMenu(hFile, MF_STRING, IDM_FILE_OPEN_REG, L"Open (&no type library)...");
     AppendMenu(hFile, MF_SEPARATOR, 0, NULL);
     AppendMenu(hFile, MF_STRING, IDM_FILE_EXIT, L"E&xit\tAlt+F4");
 
@@ -228,6 +232,34 @@ void DoOpen()
     if (GetOpenFileName(&ofn))
     {
         LoadAndShow(szFile);
+    }
+}
+
+void DoOpenRegistry()
+{
+    TCHAR szFile[MAX_PATH] = {0};
+
+    OPENFILENAME ofn = {0};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hMain;
+    ofn.lpstrFilter = L"COM Libraries (*.dll;*.ocx)\0*.dll;*.ocx\0"
+                      L"All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt = L"dll";
+
+    if (GetOpenFileName(&ofn))
+    {
+        LPCWSTR fileName = szFile;
+        for (LPCWSTR p = szFile; *p; ++p)
+            if (*p == L'\\' || *p == L'/')
+                fileName = p + 1;
+
+        if (PopulateFromRegistry(g_hTree, szFile))
+            SetStatusText(g_hMain, fileName);
+        else
+            SetStatusText(g_hMain, L"(no registered classes)");
     }
 }
 
@@ -284,6 +316,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
         case IDM_FILE_OPEN:
             DoOpen();
+            break;
+        case IDM_FILE_OPEN_REG:
+            DoOpenRegistry();
             break;
         case IDM_FILE_EXIT:
             DestroyWindow(hWnd);
