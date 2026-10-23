@@ -26,10 +26,12 @@
 #define IDM_FILE_OPEN_REG 1003
 #define IDM_VIEW_EXPAND 1101
 #define IDM_VIEW_COLLAPSE 1102
+#define IDM_VIEW_REGDETAILS  1103
 #define IDM_HELP_ABOUT 1201
 #define IDC_TREEVIEW 2001
 
 // Globals
+BOOL g_bShowRegDetails = FALSE;
 HINSTANCE g_hInst = NULL;
 HWND g_hMain = NULL;
 HWND g_hTree = NULL;
@@ -205,6 +207,7 @@ HMENU CreateMainMenu()
 
     AppendMenu(hView, MF_STRING, IDM_VIEW_EXPAND,   L"&Expand All");
     AppendMenu(hView, MF_STRING, IDM_VIEW_COLLAPSE, L"&Collapse All");
+    AppendMenu(hView, MF_STRING | MF_UNCHECKED, IDM_VIEW_REGDETAILS, L"Show &Registry Details");
 
     AppendMenu(hHelp, MF_STRING, IDM_HELP_ABOUT, L"&About...");
 
@@ -256,7 +259,7 @@ void DoOpenRegistry()
             if (*p == L'\\' || *p == L'/')
                 fileName = p + 1;
 
-        if (PopulateFromRegistry(g_hTree, szFile))
+        if (PopulateFromRegistry(g_hTree, szFile, g_bShowRegDetails))
             SetStatusText(g_hMain, fileName);
         else
             SetStatusText(g_hMain, L"(no registered classes)");
@@ -329,6 +332,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDM_VIEW_COLLAPSE:
             ExpandAll(g_hTree, TreeView_GetRoot(g_hTree), FALSE);
             break;
+        case IDM_VIEW_REGDETAILS:
+        {
+            g_bShowRegDetails = !g_bShowRegDetails;
+            HMENU hMenu = GetMenu(hWnd);
+            CheckMenuItem(hMenu, IDM_VIEW_REGDETAILS,
+                          MF_BYCOMMAND | (g_bShowRegDetails ? MF_CHECKED : MF_UNCHECKED));
+            break;
+        }
         case IDM_HELP_ABOUT:
             DoAbout();
             break;
