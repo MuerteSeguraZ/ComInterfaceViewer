@@ -243,7 +243,7 @@ void DoOpen()
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g_hMain;
     ofn.lpstrFilter = L"COM Libraries (*.dll;*.ocx;*.tlb)\0*.dll;*.ocx;*.tlb\0"
-                       L"All Files (*.*)\0*.*\0";
+                      L"All Files (*.*)\0*.*\0";
     ofn.lpstrFile = szFile;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
@@ -263,7 +263,7 @@ void DoOpenRegistry()
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g_hMain;
     ofn.lpstrFilter = L"COM Libraries (*.dll;*.ocx)\0*.dll;*.ocx\0"
-                       L"All Files (*.*)\0*.*\0";
+                      L"All Files (*.*)\0*.*\0";
     ofn.lpstrFile = szFile;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
@@ -332,9 +332,9 @@ static HTREEITEM FindInTreeRecursive(HWND hTree, HTREEITEM hItem, LPCWSTR search
 
         WCHAR text[512] = {0};
         TVITEM tvi = {0};
-        tvi.mask       = TVIF_TEXT;
-        tvi.hItem      = hItem;
-        tvi.pszText    = text;
+        tvi.mask = TVIF_TEXT;
+        tvi.hItem = hItem;
+        tvi.pszText = text;
         tvi.cchTextMax = 512;
         TreeView_GetItem(hTree, &tvi);
 
@@ -455,10 +455,10 @@ void DoFind()
     if (!registered)
     {
         WNDCLASSEX wc = {0};
-        wc.cbSize        = sizeof(wc);
-        wc.lpfnWndProc   = FindDlgProc;
-        wc.hInstance     = g_hInst;
-        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = FindDlgProc;
+        wc.hInstance = g_hInst;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_3DFACE + 1);
         wc.lpszClassName = L"ComInterfaceViewerFindDlg";
         RegisterClassEx(&wc);
