@@ -12,6 +12,7 @@
 #include <oleauto.h>
 #include <tchar.h>
 #include <strsafe.h>
+#include <string>
 
 #include "RegistryMode.h"
 
@@ -24,12 +25,14 @@
 #define IDM_FILE_OPEN 1001
 #define IDM_FILE_EXIT 1002
 #define IDM_FILE_OPEN_REG 1003
+#define IDM_FILE_EXPORT 1004
 #define IDM_VIEW_EXPAND 1101
 #define IDM_VIEW_COLLAPSE 1102
 #define IDM_VIEW_REGDETAILS  1103
 #define IDM_VIEW_PARAMS 1104
 #define IDM_HELP_ABOUT 1201
 #define IDM_EDIT_FIND 1301
+#define IDM_EDIT_COPYALL 1302
 #define IDC_TREEVIEW 2001
 #define IDC_FIND_TEXT 3001
 #define IDC_FIND_TYPE 3002
@@ -153,6 +156,116 @@ void PopulateFromTypeLib(ITypeLib* pTypeLib, LPCWSTR fileName)
     TreeView_SelectItem(g_hTree, hRoot);
 }
 
+static void DumpTree(HWND hTree, HTREEITEM hItem, int depth, std::wstring& out)
+{
+    while (hItem)
+    {
+        WCHAR text[4096] = {0};
+        TVITEM tvi = {0};
+        tvi.mask = TVIF_TEXT;
+        tvi.hItem = hItem;
+        tvi.pszText = text;
+        tvi.cchTextMax = 4096;
+        TreeView_GetItem(hTree, &tvi);
+
+        out.append(depth * 2, L' ');
+        out += text;
+        out += L"\r\n";
+
+        DumpTree(hTree, TreeView_GetChild(hTree, hItem), depth + 1, out);
+        hItem = TreeView_GetNextSibling(hTree, hItem);
+    }
+}
+
+static BOOL BuildTreeText(std::wstring& out)
+{
+    HTREEITEM hRoot = TreeView_GetRoot(g_hTree);
+    if (!hRoot)
+    {
+        MessageBox(g_hMain, L"Nothing to export, open a file first.",
+                   L"COM Interface Viewer", MB_OK | MB_ICONINFORMATION);
+        return FALSE;
+    }
+
+    DumpTree(g_hTree, hRoot, 0, out);
+    return TRUE;
+}
+
+void DoCopyAll()
+{
+    std::wstring text;
+    if (!BuildTreeText(text))
+        return;
+
+    SIZE_T cb = (text.size() + 1) * sizeof(WCHAR);
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, cb);
+    if (!hMem)
+        return;
+
+    LPVOID p = GlobalLock(hMem);
+    if (!p)
+    {
+        GlobalFree(hMem);
+        return;
+    }
+    memcpy(p, text.c_str(), cb);
+    GlobalUnlock(hMem);
+
+    if (OpenClipboard(g_hMain))
+    {
+        EmptyClipboard();
+        // clipboard owns the memory after a successful SetClipboardData
+        if (!SetClipboardData(CF_UNICODETEXT, hMem))
+            GlobalFree(hMem);
+        CloseClipboard();
+    }
+    else
+    {
+        GlobalFree(hMem);
+    }
+}
+
+void DoExport()
+{
+    std::wstring text;
+    if (!BuildTreeText(text))
+        return;
+
+    TCHAR szFile[MAX_PATH] = L"interfaces.txt";
+
+    OPENFILENAME ofn = {0};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hMain;
+    ofn.lpstrFilter = L"Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt = L"txt";
+
+    if (!GetSaveFileName(&ofn))
+        return;
+
+    // UTF-8 with BOM so Notepad doesn't guess wrong
+    int cb = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), NULL, 0, NULL, NULL);
+    std::string utf8(cb, '\0');
+    if (cb > 0)
+        WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), &utf8[0], cb, NULL, NULL);
+
+    HANDLE hFile = CreateFile(szFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+        MessageBox(g_hMain, L"Couldn't create the file.", L"COM Interface Viewer", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    const BYTE bom[3] = { 0xEF, 0xBB, 0xBF };
+    DWORD written = 0;
+    WriteFile(hFile, bom, sizeof(bom), &written, NULL);
+    if (cb > 0)
+        WriteFile(hFile, utf8.data(), (DWORD)utf8.size(), &written, NULL);
+    CloseHandle(hFile);
+}
+
 BOOL LoadAndShow(LPCWSTR path)
 {
     ITypeLib* pTypeLib = NULL;
@@ -194,9 +307,12 @@ HMENU CreateMainMenu()
     AppendMenu(hFile, MF_STRING, IDM_FILE_OPEN, L"&Open...\tCtrl+O");
     AppendMenu(hFile, MF_STRING, IDM_FILE_OPEN_REG, L"Open (&no type library)...");
     AppendMenu(hFile, MF_SEPARATOR, 0, NULL);
+    AppendMenu(hFile, MF_STRING, IDM_FILE_EXPORT, L"&Export as Text...");
+    AppendMenu(hFile, MF_SEPARATOR, 0, NULL);
     AppendMenu(hFile, MF_STRING, IDM_FILE_EXIT, L"E&xit\tAlt+F4");
 
     AppendMenu(hEdit, MF_STRING, IDM_EDIT_FIND, L"&Find...\tCtrl+F");
+    AppendMenu(hEdit, MF_STRING, IDM_EDIT_COPYALL, L"&Copy All to Clipboard");
 
     AppendMenu(hView, MF_STRING, IDM_VIEW_EXPAND,   L"&Expand All");
     AppendMenu(hView, MF_STRING, IDM_VIEW_COLLAPSE, L"&Collapse All");
@@ -310,19 +426,20 @@ static HTREEITEM FindInTreeRecursive(HWND hTree, HTREEITEM hItem, LPCWSTR search
         if (hAfter && hItem == hAfter)
             *pPassed = TRUE;
 
-        WCHAR text[512] = {0};
+        // signatures can be long, so don't truncate
+        WCHAR text[2048] = {0};
         TVITEM tvi = {0};
         tvi.mask = TVIF_TEXT;
         tvi.hItem = hItem;
         tvi.pszText = text;
-        tvi.cchTextMax = 512;
+        tvi.cchTextMax = 2048;
         TreeView_GetItem(hTree, &tvi);
 
         BOOL isMatch = MatchFilter(text, filter);
         if (isMatch)
         {
-            WCHAR h[512], n[256];
-            StringCchCopyW(h, 512, text);
+            WCHAR h[2048], n[256];
+            StringCchCopyW(h, 2048, text);
             StringCchCopyW(n, 256, search);
             CharLowerW(h);
             CharLowerW(n);
@@ -570,11 +687,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDM_FILE_OPEN_REG:
             DoOpenRegistry();
             break;
+        case IDM_FILE_EXPORT:
+            DoExport();
+            break;
         case IDM_FILE_EXIT:
             DestroyWindow(hWnd);
             break;
         case IDM_EDIT_FIND:
             DoFind();
+            break;
+        case IDM_EDIT_COPYALL:
+            DoCopyAll();
             break;
         case IDM_VIEW_EXPAND:
             ExpandAll(g_hTree, TreeView_GetRoot(g_hTree), TRUE);
