@@ -27,6 +27,7 @@
 #define IDM_VIEW_EXPAND 1101
 #define IDM_VIEW_COLLAPSE 1102
 #define IDM_VIEW_REGDETAILS  1103
+#define IDM_VIEW_PARAMS 1104
 #define IDM_HELP_ABOUT 1201
 #define IDM_EDIT_FIND 1301
 #define IDC_TREEVIEW 2001
@@ -37,6 +38,7 @@
 
 // Globals
 BOOL g_bShowRegDetails = FALSE;
+BOOL g_bShowParams = FALSE;
 HINSTANCE g_hInst = NULL;
 HWND g_hMain = NULL;
 HWND g_hTree = NULL;
@@ -133,32 +135,7 @@ void PopulateFromTypeLib(ITypeLib* pTypeLib, LPCWSTR fileName)
                 if (FAILED(pTypeInfo->GetFuncDesc(m, &pFuncDesc)) || !pFuncDesc)
                     continue;
 
-                BSTR bstrFuncName = NULL;
-                pTypeInfo->GetDocumentation(pFuncDesc->memid, &bstrFuncName, NULL, NULL, NULL);
-
-                WCHAR szMethod[256];
-                if (bstrFuncName && *bstrFuncName)
-                {
-                    // little prefix so you can see what kind it is
-                    LPCWSTR kind = L"";
-                    switch (pFuncDesc->invkind)
-                    {
-                    case INVOKE_FUNC: kind = L"[method] "; break;
-                    case INVOKE_PROPERTYGET: kind = L"[get] ";    break;
-                    case INVOKE_PROPERTYPUT: kind = L"[put] ";    break;
-                    case INVOKE_PROPERTYPUTREF:kind = L"[putref] "; break;
-                    }
-                    StringCchPrintf(szMethod, 256, L"%s%s", kind, bstrFuncName);
-                }
-                else
-                {
-                    StringCchPrintf(szMethod, 256, L"(unnamed method)");
-                }
-
-                AddTreeItem(g_hTree, hIface, szMethod);
-
-                if (bstrFuncName)
-                    SysFreeString(bstrFuncName);
+                AddMethodItem(g_hTree, hIface, pTypeInfo, pFuncDesc, g_bShowParams);
 
                 pTypeInfo->ReleaseFuncDesc(pFuncDesc);
             }
@@ -224,6 +201,7 @@ HMENU CreateMainMenu()
     AppendMenu(hView, MF_STRING, IDM_VIEW_EXPAND,   L"&Expand All");
     AppendMenu(hView, MF_STRING, IDM_VIEW_COLLAPSE, L"&Collapse All");
     AppendMenu(hView, MF_STRING | MF_UNCHECKED, IDM_VIEW_REGDETAILS, L"Show &Registry Details");
+    AppendMenu(hView, MF_STRING | MF_UNCHECKED, IDM_VIEW_PARAMS, L"Show &Parameters");
 
     AppendMenu(hHelp, MF_STRING, IDM_HELP_ABOUT, L"&About...");
 
@@ -276,7 +254,9 @@ void DoOpenRegistry()
             if (*p == L'\\' || *p == L'/')
                 fileName = p + 1;
 
-        if (PopulateFromRegistry(g_hTree, szFile, g_bShowRegDetails))
+        g_szFile[0] = 0; // registry mode now, not typelib mode
+
+        if (PopulateFromRegistry(g_hTree, szFile, g_bShowRegDetails, g_bShowParams))
         {
             StringCchCopy(g_szLastRegFile, MAX_PATH, szFile);
             SetStatusText(g_hMain, fileName);
@@ -616,8 +596,34 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     if (*p == L'\\' || *p == L'/')
                         fileName = p + 1;
 
-                PopulateFromRegistry(g_hTree, g_szLastRegFile, g_bShowRegDetails);
+                PopulateFromRegistry(g_hTree, g_szLastRegFile, g_bShowRegDetails, g_bShowParams);
                 SetStatusText(g_hMain, fileName);
+            }
+            break;
+        }
+        case IDM_VIEW_PARAMS:
+        {
+            g_bShowParams = !g_bShowParams;
+            HMENU hMenu = GetMenu(hWnd);
+            CheckMenuItem(hMenu, IDM_VIEW_PARAMS,
+                          MF_BYCOMMAND | (g_bShowParams ? MF_CHECKED : MF_UNCHECKED));
+
+            if (g_szLastRegFile[0])
+            {
+                LPCWSTR fileName = g_szLastRegFile;
+                for (LPCWSTR p = g_szLastRegFile; *p; ++p)
+                    if (*p == L'\\' || *p == L'/')
+                        fileName = p + 1;
+
+                PopulateFromRegistry(g_hTree, g_szLastRegFile, g_bShowRegDetails, g_bShowParams);
+                SetStatusText(g_hMain, fileName);
+            }
+            else if (g_szFile[0])
+            {
+                // LoadAndShow overwrites g_szFile, so hand it a copy
+                TCHAR szReload[MAX_PATH];
+                StringCchCopy(szReload, MAX_PATH, g_szFile);
+                LoadAndShow(szReload);
             }
             break;
         }

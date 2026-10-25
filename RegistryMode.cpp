@@ -6,6 +6,7 @@
 #include <commctrl.h>
 #include <oleauto.h>
 #include <strsafe.h>
+#include <string>
 
 #include "RegistryMode.h"
 
@@ -68,7 +69,180 @@ static BOOL ReadStringValue(HKEY hKey, LPCWSTR valueName, WCHAR* buf, DWORD cchB
     return TRUE;
 }
 
-static void AddTypeLibMethods(HWND hTree, HTREEITEM hParent, HKEY hClsidKey, REFGUID clsidGuid, LPCWSTR dllPath)
+static void TypeDescToString(ITypeInfo* pTypeInfo, const TYPEDESC* pTd, std::wstring& out)
+{
+    switch (pTd->vt)
+    {
+    case VT_PTR:
+        TypeDescToString(pTypeInfo, pTd->lptdesc, out);
+        out += L"*";
+        return;
+
+    case VT_SAFEARRAY:
+        out += L"SAFEARRAY(";
+        TypeDescToString(pTypeInfo, pTd->lptdesc, out);
+        out += L")";
+        return;
+
+    case VT_CARRAY:
+        TypeDescToString(pTypeInfo, &pTd->lpadesc->tdescElem, out);
+        for (USHORT d = 0; d < pTd->lpadesc->cDims; ++d)
+        {
+            WCHAR dim[32];
+            StringCchPrintfW(dim, 32, L"[%lu]", pTd->lpadesc->rgbounds[d].cElements);
+            out += dim;
+        }
+        return;
+
+    case VT_USERDEFINED:
+    {
+        // IFoo, GUID, some enum, etc.
+        ITypeInfo* pRef = NULL;
+        BSTR bstrName = NULL;
+        if (SUCCEEDED(pTypeInfo->GetRefTypeInfo(pTd->hreftype, &pRef)) && pRef)
+        {
+            pRef->GetDocumentation(MEMBERID_NIL, &bstrName, NULL, NULL, NULL);
+            pRef->Release();
+        }
+        if (bstrName && *bstrName)
+            out += bstrName;
+        else
+            out += L"(unknown user type)";
+        if (bstrName)
+            SysFreeString(bstrName);
+        return;
+    }
+
+    case VT_I1:       out += L"char"; return;
+    case VT_UI1:      out += L"unsigned char"; return;
+    case VT_I2:       out += L"short"; return;
+    case VT_UI2:      out += L"unsigned short"; return;
+    case VT_I4:       out += L"long"; return;
+    case VT_UI4:      out += L"unsigned long"; return;
+    case VT_I8:       out += L"__int64"; return;
+    case VT_UI8:      out += L"unsigned __int64"; return;
+    case VT_INT:      out += L"int"; return;
+    case VT_UINT:     out += L"unsigned int"; return;
+    case VT_R4:       out += L"float"; return;
+    case VT_R8:       out += L"double"; return;
+    case VT_CY:       out += L"CURRENCY"; return;
+    case VT_DATE:     out += L"DATE"; return;
+    case VT_BSTR:     out += L"BSTR"; return;
+    case VT_BOOL:     out += L"VARIANT_BOOL"; return;
+    case VT_VARIANT:  out += L"VARIANT"; return;
+    case VT_DECIMAL:  out += L"DECIMAL"; return;
+    case VT_ERROR:    out += L"SCODE"; return;
+    case VT_HRESULT:  out += L"HRESULT"; return;
+    case VT_DISPATCH: out += L"IDispatch*"; return;
+    case VT_UNKNOWN:  out += L"IUnknown*"; return;
+    case VT_VOID:     out += L"void"; return;
+    case VT_LPSTR:    out += L"LPSTR"; return;
+    case VT_LPWSTR:   out += L"LPWSTR"; return;
+    }
+
+    WCHAR unk[32];
+    StringCchPrintfW(unk, 32, L"VT_%u", (UINT)pTd->vt);
+    out += unk;
+}
+
+// "[in, out, retval]" or nothing at all
+static void ParamFlagsToString(USHORT flags, std::wstring& out)
+{
+    std::wstring f;
+    if (flags & PARAMFLAG_FIN)      f += L"in";
+    if (flags & PARAMFLAG_FOUT)     f += f.empty() ? L"out" : L", out";
+    if (flags & PARAMFLAG_FLCID)    f += f.empty() ? L"lcid" : L", lcid";
+    if (flags & PARAMFLAG_FRETVAL)  f += f.empty() ? L"retval" : L", retval";
+    if (flags & PARAMFLAG_FOPT)     f += f.empty() ? L"optional" : L", optional";
+
+    if (!f.empty())
+    {
+        out += L"[";
+        out += f;
+        out += L"] ";
+    }
+}
+
+void AddMethodItem(HWND hTree, HTREEITEM hParent, ITypeInfo* pTypeInfo, FUNCDESC* pFuncDesc, BOOL showParams)
+{
+    // memid -> name (index 0) followed by the parameter names
+    BSTR names[64] = {0};
+    UINT cNames = 0;
+    pTypeInfo->GetNames(pFuncDesc->memid, names, ARRAYSIZE(names), &cNames);
+
+    // little prefix so you can see what kind it is
+    LPCWSTR kind = L"";
+    switch (pFuncDesc->invkind)
+    {
+    case INVOKE_FUNC:           kind = L"[method] "; break;
+    case INVOKE_PROPERTYGET:    kind = L"[get] ";    break;
+    case INVOKE_PROPERTYPUT:    kind = L"[put] ";    break;
+    case INVOKE_PROPERTYPUTREF: kind = L"[putref] "; break;
+    }
+
+    std::wstring text = kind;
+
+    if (!showParams)
+    {
+        if (cNames && names[0] && *names[0])
+            text += names[0];
+        else
+            text = L"(unnamed method)";
+    }
+    else
+    {
+        // return type
+        TypeDescToString(pTypeInfo, &pFuncDesc->elemdescFunc.tdesc, text);
+        text += L" ";
+
+        if (cNames && names[0] && *names[0])
+            text += names[0];
+        else
+            text += L"(unnamed method)";
+
+        // parameters
+        text += L"(";
+        for (SHORT p = 0; p < pFuncDesc->cParams; ++p)
+        {
+            const ELEMDESC* pElem = &pFuncDesc->lprgelemdescParam[p];
+
+            if (p)
+                text += L", ";
+
+            ParamFlagsToString(pElem->paramdesc.wParamFlags, text);
+            TypeDescToString(pTypeInfo, &pElem->tdesc, text);
+            text += L" ";
+
+            if ((UINT)(p + 1) < cNames && names[p + 1] && *names[p + 1])
+            {
+                text += names[p + 1];
+            }
+            else
+            {
+                WCHAR argName[16];
+                StringCchPrintfW(argName, 16, L"arg%d", (int)p);
+                text += argName;
+            }
+        }
+        text += L")";
+
+        // vtable offset (bytes, as stored in the typelib) or dispid
+        WCHAR where[48];
+        if (pFuncDesc->funckind == FUNC_DISPATCH)
+            StringCchPrintfW(where, 48, L"  [dispid 0x%lX]", (ULONG)pFuncDesc->memid);
+        else
+            StringCchPrintfW(where, 48, L"  [vtbl +0x%X]", (UINT)pFuncDesc->oVft);
+        text += where;
+    }
+
+    AddItem(hTree, hParent, text.c_str());
+
+    for (UINT i = 0; i < cNames; ++i)
+        if (names[i])
+            SysFreeString(names[i]);
+}
+
+static void AddTypeLibMethods(HWND hTree, HTREEITEM hParent, HKEY hClsidKey, REFGUID clsidGuid, LPCWSTR dllPath, BOOL showParams)
 {
     ITypeLib* pTypeLib = NULL;
 
@@ -150,30 +324,8 @@ static void AddTypeLibMethods(HWND hTree, HTREEITEM hParent, HKEY hClsidKey, REF
                         if (FAILED(pIfaceInfo->GetFuncDesc(m, &pFuncDesc)) || !pFuncDesc)
                             continue;
 
-                        BSTR bstrFuncName = NULL;
-                        pIfaceInfo->GetDocumentation(pFuncDesc->memid, &bstrFuncName, NULL, NULL, NULL);
+                        AddMethodItem(hTree, hIface, pIfaceInfo, pFuncDesc, showParams);
 
-                        WCHAR szMethod[256];
-                        if (bstrFuncName && *bstrFuncName)
-                        {
-                            LPCWSTR kind = L"";
-                            switch (pFuncDesc->invkind)
-                            {
-                            case INVOKE_FUNC:           kind = L"[method] "; break;
-                            case INVOKE_PROPERTYGET:    kind = L"[get] ";    break;
-                            case INVOKE_PROPERTYPUT:    kind = L"[put] ";    break;
-                            case INVOKE_PROPERTYPUTREF: kind = L"[putref] "; break;
-                            }
-                            StringCchPrintfW(szMethod, 256, L"%s%s", kind, bstrFuncName);
-                        }
-                        else
-                        {
-                            StringCchCopyW(szMethod, 256, L"(unnamed method)");
-                        }
-
-                        AddItem(hTree, hIface, szMethod);
-
-                        if (bstrFuncName) SysFreeString(bstrFuncName);
                         pIfaceInfo->ReleaseFuncDesc(pFuncDesc);
                     }
 
@@ -191,7 +343,7 @@ static void AddTypeLibMethods(HWND hTree, HTREEITEM hParent, HKEY hClsidKey, REF
     pTypeLib->Release();
 }
 
-BOOL PopulateFromRegistry(HWND hTree, LPCWSTR dllPath, BOOL showDetails)
+BOOL PopulateFromRegistry(HWND hTree, LPCWSTR dllPath, BOOL showDetails, BOOL showParams)
 {
     if (!hTree || !dllPath || !*dllPath)
         return FALSE;
@@ -292,7 +444,7 @@ BOOL PopulateFromRegistry(HWND hTree, LPCWSTR dllPath, BOOL showDetails)
                     GUID clsidGuid = {0};
                     if (SUCCEEDED(CLSIDFromString(clsidName, &clsidGuid)))
                     {
-                        AddTypeLibMethods(hTree, hClass, hThisClsid, clsidGuid, dllPath);
+                        AddTypeLibMethods(hTree, hClass, hThisClsid, clsidGuid, dllPath, showParams);
                     }
                 }
             }
